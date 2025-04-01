@@ -25,12 +25,28 @@ pub fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) {
     draw_title(f, chunks[0]);
     draw_tabs(f, app, chunks[1]);
 
-    // Draw content based on current tab
-    match app.current_tab {
-        Tab::Recent => draw_crates_list(f, app, chunks[2], "Recent Crates"),
-        Tab::Search => draw_search_tab(f, app, chunks[2]),
-        Tab::Trending => draw_repos_list(f, app, chunks[2], "Trending Repositories"),
-        Tab::Help => draw_help(f, app, chunks[2]),
+    // Draw content based on current tab and detail view
+    if app.show_detail {
+        match app.current_tab {
+            Tab::Recent | Tab::Search => {
+                if !app.crates.is_empty() && app.selected_index < app.crates.len() {
+                    draw_crate_detail(f, app, chunks[2]);
+                }
+            }
+            Tab::Trending => {
+                if !app.repos.is_empty() && app.selected_index < app.repos.len() {
+                    draw_repo_detail(f, app, chunks[2]);
+                }
+            }
+            _ => {}
+        }
+    } else {
+        match app.current_tab {
+            Tab::Search => draw_search_tab(f, app, chunks[2]),
+            Tab::Recent => draw_crates_list(f, app, chunks[2], "Recent Crates"),
+            Tab::Trending => draw_repos_list(f, app, chunks[2], "Trending Repositories"),
+            Tab::Help => draw_help(f, app, chunks[2]),
+        }
     }
 
     draw_status_bar(f, app, chunks[3]);
@@ -49,7 +65,7 @@ fn draw_title<B: Backend>(f: &mut Frame<B>, area: Rect) {
 }
 
 fn draw_tabs<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
-    let titles = ["Recent", "Search", "Trending", "Help"]
+    let titles = ["Search", "Recent", "Trending", "Help"]
         .iter()
         .map(|t| Spans::from(vec![Span::styled(*t, Style::default().fg(Color::White))]))
         .collect();
@@ -57,8 +73,8 @@ fn draw_tabs<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::ALL).title("Tabs"))
         .select(match app.current_tab {
-            Tab::Recent => 0,
-            Tab::Search => 1,
+            Tab::Search => 0,
+            Tab::Recent => 1,
             Tab::Trending => 2,
             Tab::Help => 3,
         })
@@ -96,7 +112,7 @@ fn draw_crates_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: 
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 )]),
-                Spans::from(vec![Span::raw(desc)]),
+                Spans::from(vec![Span::raw(truncate_str(&desc, 60))]),
                 Spans::from(vec![
                     Span::styled(downloads, Style::default().fg(Color::Blue)),
                     Span::raw(" | "),
@@ -188,6 +204,7 @@ fn draw_repos_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: &
             let desc = r.description.clone().unwrap_or_default();
             let stars = format!("★ {}", r.stargazers_count);
             let forks = format!("🍴 {}", r.forks_count);
+            let language = r.language.clone().unwrap_or_else(|| "Unknown".to_string());
 
             let content = vec![
                 Spans::from(vec![Span::styled(
@@ -196,11 +213,13 @@ fn draw_repos_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: &
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 )]),
-                Spans::from(vec![Span::raw(desc)]),
+                Spans::from(vec![Span::raw(truncate_str(&desc, 60))]),
                 Spans::from(vec![
                     Span::styled(stars, Style::default().fg(Color::Yellow)),
                     Span::raw(" | "),
                     Span::styled(forks, Style::default().fg(Color::Blue)),
+                    Span::raw(" | Language: "),
+                    Span::styled(language, Style::default().fg(Color::Magenta)),
                 ]),
             ];
 
@@ -280,17 +299,241 @@ fn draw_search_tab<B: Backend>(f: &mut Frame<B>, app: &mut App, area: Rect) {
         ])
         .split(area);
 
-    // Draw search input
+    // Draw search input - highlight when in input mode
     let search_input = Paragraph::new(app.search_query.as_ref())
-        .style(Style::default())
-        .block(Block::default().borders(Borders::ALL).title("Search Query"));
+        .style(if app.input_mode {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(if app.input_mode {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                })
+                .title(if app.input_mode {
+                    "Enter search query (press Enter to search)"
+                } else {
+                    "Search Query (press / to search)"
+                }),
+        );
 
     f.render_widget(search_input, chunks[0]);
 
-    // Draw search results
-    draw_crates_list(f, app, chunks[1], "Search Results");
+    // Draw search results with a better title
+    let title = if app.search_query.is_empty() {
+        "Type / to search for crates"
+    } else {
+        "Search Results"
+    };
+
+    draw_crates_list(f, app, chunks[1], title);
 }
 
+fn draw_crate_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
+    let crate_data = &app.crates[app.selected_index];
+
+    let title = format!("{} v{}", crate_data.name, crate_data.max_version);
+
+    let mut content = vec![
+        Spans::from(vec![Span::styled(
+            "Description:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Spans::from(vec![Span::raw(
+            crate_data
+                .description
+                .clone()
+                .unwrap_or_else(|| "No description available.".to_string()),
+        )]),
+        Spans::from(vec![]),
+        Spans::from(vec![
+            Span::styled(
+                "Downloads: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}", crate_data.downloads),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Spans::from(vec![]),
+        Spans::from(vec![
+            Span::styled(
+                "Created: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format_date(&crate_data.created_at),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Spans::from(vec![
+            Span::styled(
+                "Updated: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format_date(&crate_data.updated_at),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Spans::from(vec![]),
+    ];
+
+    if let Some(ref docs) = crate_data.documentation {
+        content.push(Spans::from(vec![
+            Span::styled(
+                "Documentation: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                docs,
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+        ]));
+    }
+
+    if let Some(ref repo) = crate_data.repository {
+        content.push(Spans::from(vec![
+            Span::styled(
+                "Repository: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                repo,
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+        ]));
+    }
+
+    // Add navigation help
+    content.extend_from_slice(&[
+        Spans::from(vec![]),
+        Spans::from(vec![]),
+        Spans::from(vec![Span::styled(
+            "Press ESC or q to go back",
+            Style::default().fg(Color::Gray),
+        )]),
+    ]);
+
+    let detail = Paragraph::new(content)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .wrap(Wrap { trim: true })
+        .scroll((app.detail_scroll as u16, 0));
+
+    f.render_widget(detail, area);
+}
+
+fn draw_repo_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
+    let repo_data = &app.repos[app.selected_index];
+
+    let title = &repo_data.full_name;
+
+    let content = vec![
+        Spans::from(vec![Span::styled(
+            "Description:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Spans::from(vec![Span::raw(
+            repo_data
+                .description
+                .clone()
+                .unwrap_or_else(|| "No description available.".to_string()),
+        )]),
+        Spans::from(vec![]),
+        Spans::from(vec![
+            Span::styled(
+                "Stars: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("★ {}", repo_data.stargazers_count),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Spans::from(vec![
+            Span::styled(
+                "Forks: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("🍴 {}", repo_data.forks_count),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Spans::from(vec![]),
+        Spans::from(vec![
+            Span::styled(
+                "Language: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                repo_data
+                    .language
+                    .clone()
+                    .unwrap_or_else(|| "Unknown".to_string()),
+                Style::default().fg(Color::Magenta),
+            ),
+        ]),
+        Spans::from(vec![]),
+        Spans::from(vec![
+            Span::styled(
+                "URL: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &repo_data.html_url,
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+        ]),
+        // Add navigation help
+        Spans::from(vec![]),
+        Spans::from(vec![]),
+        Spans::from(vec![Span::styled(
+            "Press ESC or q to go back",
+            Style::default().fg(Color::Gray),
+        )]),
+    ];
+
+    let detail = Paragraph::new(content)
+        .block(Block::default().borders(Borders::ALL).title(title.as_str()))
+        .wrap(Wrap { trim: true })
+        .scroll((app.detail_scroll as u16, 0));
+
+    f.render_widget(detail, area);
+}
 fn draw_help<B: Backend>(f: &mut Frame<B>, _app: &App, area: Rect) {
     let text = vec![
         Spans::from(Span::styled(
@@ -331,7 +574,7 @@ fn draw_help<B: Backend>(f: &mut Frame<B>, _app: &App, area: Rect) {
         ]),
         Spans::from(vec![
             Span::styled("/", Style::default().fg(Color::Cyan)),
-            Span::raw(" - Search"),
+            Span::raw(" - Search (in Search tab)"),
         ]),
         Spans::from(vec![
             Span::styled("1-4", Style::default().fg(Color::Cyan)),
@@ -344,6 +587,26 @@ fn draw_help<B: Backend>(f: &mut Frame<B>, _app: &App, area: Rect) {
             Span::raw(" - Quit"),
         ]),
         Spans::from(""),
+        Spans::from(vec![
+            Span::styled("Esc", Style::default().fg(Color::Cyan)),
+            Span::raw(" - Exit detail view or search input"),
+        ]),
+        Spans::from(""),
+        Spans::from(Span::styled(
+            "In Detail View:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Spans::from(vec![
+            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::raw(" - Scroll up/down"),
+        ]),
+        Spans::from(vec![
+            Span::styled("PageUp/PageDown", Style::default().fg(Color::Cyan)),
+            Span::raw(" - Scroll by page"),
+        ]),
+        Spans::from(""),
         Spans::from(Span::styled(
             "Tab Guide:",
             Style::default()
@@ -352,12 +615,12 @@ fn draw_help<B: Backend>(f: &mut Frame<B>, _app: &App, area: Rect) {
         )),
         Spans::from(""),
         Spans::from(vec![
-            Span::styled("Recent", Style::default().fg(Color::Green)),
-            Span::raw(" - Recently updated crates"),
-        ]),
-        Spans::from(vec![
             Span::styled("Search", Style::default().fg(Color::Green)),
             Span::raw(" - Search for crates by name"),
+        ]),
+        Spans::from(vec![
+            Span::styled("Recent", Style::default().fg(Color::Green)),
+            Span::raw(" - Recently updated crates"),
         ]),
         Spans::from(vec![
             Span::styled("Trending", Style::default().fg(Color::Green)),
@@ -377,19 +640,69 @@ fn draw_help<B: Backend>(f: &mut Frame<B>, _app: &App, area: Rect) {
 }
 
 fn draw_status_bar<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
-    let current_mode = match app.current_tab {
-        Tab::Recent => "Recent",
-        Tab::Search => "Search",
-        Tab::Trending => "Trending",
+    let mode_text = match app.current_tab {
+        Tab::Search => {
+            if app.show_detail {
+                "Search > Crate Detail"
+            } else if app.input_mode {
+                "Search > Input Mode"
+            } else {
+                "Search"
+            }
+        }
+        Tab::Recent => {
+            if app.show_detail {
+                "Recent > Crate Detail"
+            } else {
+                "Recent"
+            }
+        }
+        Tab::Trending => {
+            if app.show_detail {
+                "Trending > Repository Detail"
+            } else {
+                "Trending"
+            }
+        }
         Tab::Help => "Help",
     };
 
-    let status = format!("Mode: {} | Press 'q' to quit", current_mode);
+    let navigation_help = if app.show_detail {
+        "ESC to go back | j/k to scroll"
+    } else if app.input_mode {
+        "ESC to cancel | Enter to search"
+    } else if matches!(app.current_tab, Tab::Search) {
+        "/ to search | Enter to view details | q to quit"
+    } else {
+        "Enter to view details | q to quit"
+    };
+
+    let status = format!("{} | {}", mode_text, navigation_help);
+
     let status_bar = Paragraph::new(Span::styled(
         status,
         Style::default().fg(Color::White).bg(Color::DarkGray),
     ))
-    .block(Block::default().borders(Borders::ALL));
+    .block(Block::default().borders(Borders::ALL))
+    .alignment(ratatui::layout::Alignment::Center);
 
     f.render_widget(status_bar, area);
+}
+
+// Helper function to format dates nicely
+fn format_date(date_str: &str) -> String {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(date_str) {
+        dt.format("%Y-%m-%d %H:%M").to_string()
+    } else {
+        date_str.to_string()
+    }
+}
+
+// Helper function to truncate strings to a maximum length
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len - 3])
+    }
 }

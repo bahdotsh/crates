@@ -5,8 +5,8 @@ use std::error;
 pub type AppResult<T> = std::result::Result<T, Box<dyn error::Error>>;
 
 pub enum Tab {
-    Recent,
     Search,
+    Recent,
     Trending,
     Help,
 }
@@ -29,13 +29,14 @@ pub struct App {
     pub trend_period: String,
     pub show_detail: bool,
     pub input_mode: bool,
+    pub detail_scroll: usize,
 }
 
 impl App {
     pub fn new() -> Self {
         let mut app = Self {
             running: true,
-            current_tab: Tab::Recent,
+            current_tab: Tab::Search, // Make Search the first tab
             crates: Vec::new(),
             repos: Vec::new(),
             search_query: String::new(),
@@ -44,6 +45,7 @@ impl App {
             trend_period: "weekly".to_string(),
             show_detail: false,
             input_mode: false,
+            detail_scroll: 0,
         };
 
         // Load initial data
@@ -54,9 +56,39 @@ impl App {
 
     pub fn tick(&mut self) {
         // Update app state on tick
+        match self.loading_state {
+            LoadingState::Loading => match self.current_tab {
+                Tab::Recent => self.load_recent_crates(),
+                Tab::Trending => self.load_trending_repos(),
+                Tab::Search => {
+                    if !self.search_query.is_empty() {
+                        self.search_crates();
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
+        // Handle quit event in any mode
+        if key.code == KeyCode::Char('q') && !self.input_mode {
+            self.running = false;
+            return;
+        }
+
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.running = false;
+            return;
+        }
+
+        // Handle detail view mode
+        if self.show_detail {
+            self.handle_detail_mode(key);
+            return;
+        }
+
         // Handle input mode separately
         if self.input_mode {
             self.handle_input_mode(key);
@@ -64,12 +96,6 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('q') => {
-                self.running = false;
-            }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.running = false;
-            }
             KeyCode::Tab => {
                 self.next_tab();
             }
@@ -83,14 +109,15 @@ impl App {
                 self.prev_item();
             }
             KeyCode::Enter => {
-                self.toggle_detail();
+                self.show_detail = true;
+                self.detail_scroll = 0;
             }
             KeyCode::Char('1') => {
-                self.current_tab = Tab::Recent;
-                self.load_recent_crates();
+                self.current_tab = Tab::Search;
             }
             KeyCode::Char('2') => {
-                self.current_tab = Tab::Search;
+                self.current_tab = Tab::Recent;
+                self.load_recent_crates();
             }
             KeyCode::Char('3') => {
                 self.current_tab = Tab::Trending;
@@ -103,6 +130,27 @@ impl App {
                 if matches!(self.current_tab, Tab::Search) {
                     self.input_mode = true;
                 }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_detail_mode(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.show_detail = false;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.detail_scroll = self.detail_scroll.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                self.detail_scroll = self.detail_scroll.saturating_add(10);
+            }
+            KeyCode::PageUp => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(10);
             }
             _ => {}
         }
@@ -129,34 +177,52 @@ impl App {
 
     fn next_tab(&mut self) {
         self.current_tab = match self.current_tab {
-            Tab::Recent => Tab::Search,
-            Tab::Search => Tab::Trending,
+            Tab::Search => Tab::Recent,
+            Tab::Recent => Tab::Trending,
             Tab::Trending => Tab::Help,
-            Tab::Help => Tab::Recent,
+            Tab::Help => Tab::Search,
         };
         self.selected_index = 0;
+        self.show_detail = false;
 
-        // Load data for the new tab
+        // Just set loading state but don't actually load
         match self.current_tab {
-            Tab::Recent => self.load_recent_crates(),
-            Tab::Trending => self.load_trending_repos(),
+            Tab::Recent => {
+                if self.crates.is_empty() {
+                    self.loading_state = LoadingState::Loading;
+                }
+            }
+            Tab::Trending => {
+                if self.repos.is_empty() {
+                    self.loading_state = LoadingState::Loading;
+                }
+            }
             _ => {}
         }
     }
 
     fn prev_tab(&mut self) {
         self.current_tab = match self.current_tab {
-            Tab::Recent => Tab::Help,
-            Tab::Search => Tab::Recent,
-            Tab::Trending => Tab::Search,
+            Tab::Search => Tab::Help,
+            Tab::Recent => Tab::Search,
+            Tab::Trending => Tab::Recent,
             Tab::Help => Tab::Trending,
         };
         self.selected_index = 0;
+        self.show_detail = false;
 
-        // Load data for the new tab
+        // Just set loading state but don't actually load
         match self.current_tab {
-            Tab::Recent => self.load_recent_crates(),
-            Tab::Trending => self.load_trending_repos(),
+            Tab::Recent => {
+                if self.crates.is_empty() {
+                    self.loading_state = LoadingState::Loading;
+                }
+            }
+            Tab::Trending => {
+                if self.repos.is_empty() {
+                    self.loading_state = LoadingState::Loading;
+                }
+            }
             _ => {}
         }
     }
@@ -187,10 +253,6 @@ impl App {
                 max - 1
             };
         }
-    }
-
-    fn toggle_detail(&mut self) {
-        self.show_detail = !self.show_detail;
     }
 
     fn load_recent_crates(&mut self) {
@@ -224,6 +286,7 @@ impl App {
             }
         }
     }
+
     pub fn search_crates(&mut self) {
         if self.search_query.is_empty() {
             return;
