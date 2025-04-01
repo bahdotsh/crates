@@ -4,10 +4,12 @@ use std::error;
 
 pub type AppResult<T> = std::result::Result<T, Box<dyn error::Error>>;
 
+#[derive(PartialEq)]
 pub enum Tab {
     Search,
     Recent,
     Trending,
+    Compare,
     Help,
 }
 
@@ -16,6 +18,18 @@ pub enum LoadingState {
     Loading,
     Loaded,
     Error(String),
+}
+
+pub struct SecurityInfo {
+    pub warnings: Vec<String>,
+    pub safe: bool,
+}
+
+#[allow(dead_code)]
+pub struct ComparedCrate {
+    pub details: Crate,
+    pub security: SecurityInfo,
+    pub selected: bool,
 }
 
 pub struct App {
@@ -30,13 +44,16 @@ pub struct App {
     pub show_detail: bool,
     pub input_mode: bool,
     pub detail_scroll: usize,
+    pub compared_crates: Vec<ComparedCrate>,
+    pub compare_search_query: String,
+    pub compare_input_mode: bool,
 }
 
 impl App {
     pub fn new() -> Self {
         let mut app = Self {
             running: true,
-            current_tab: Tab::Search, // Make Search the first tab
+            current_tab: Tab::Search,
             crates: Vec::new(),
             repos: Vec::new(),
             search_query: String::new(),
@@ -46,6 +63,9 @@ impl App {
             show_detail: false,
             input_mode: false,
             detail_scroll: 0,
+            compared_crates: Vec::new(),
+            compare_search_query: String::new(),
+            compare_input_mode: false,
         };
 
         // Load initial data
@@ -71,9 +91,91 @@ impl App {
         }
     }
 
+    pub fn add_to_comparison(&mut self) {
+        if self.current_tab == Tab::Recent || self.current_tab == Tab::Search {
+            if !self.crates.is_empty() && self.selected_index < self.crates.len() {
+                let current_crate = &self.crates[self.selected_index];
+
+                // Check if already in comparison
+                if self
+                    .compared_crates
+                    .iter()
+                    .any(|c| c.details.name == current_crate.name)
+                {
+                    return; // Already added
+                }
+
+                // Fetch full details for the crate
+                match api::get_crate_details(&current_crate.name) {
+                    Ok(details) => {
+                        let security_warnings = api::security_check(&details);
+                        self.compared_crates.push(ComparedCrate {
+                            details,
+                            security: SecurityInfo {
+                                warnings: security_warnings.clone(),
+                                safe: security_warnings.is_empty(),
+                            },
+                            selected: false,
+                        });
+                    }
+                    Err(_) => {
+                        // If we can't get details, use the basic info we have
+                        let security_warnings = api::security_check(current_crate);
+                        self.compared_crates.push(ComparedCrate {
+                            details: current_crate.clone(),
+                            security: SecurityInfo {
+                                warnings: security_warnings.clone(),
+                                safe: security_warnings.is_empty(),
+                            },
+                            selected: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn remove_from_comparison(&mut self) {
+        if self.current_tab == Tab::Compare && !self.compared_crates.is_empty() {
+            self.compared_crates.remove(self.selected_index);
+            if self.selected_index >= self.compared_crates.len() && !self.compared_crates.is_empty()
+            {
+                self.selected_index = self.compared_crates.len() - 1;
+            }
+        }
+    }
+
+    pub fn add_crate_to_comparison_by_name(&mut self, name: &str) {
+        match api::get_crate_details(name) {
+            Ok(details) => {
+                // Check if already in comparison
+                if self
+                    .compared_crates
+                    .iter()
+                    .any(|c| c.details.name == details.name)
+                {
+                    return; // Already added
+                }
+
+                let security_warnings = api::security_check(&details);
+                self.compared_crates.push(ComparedCrate {
+                    details,
+                    security: SecurityInfo {
+                        warnings: security_warnings.clone(),
+                        safe: security_warnings.is_empty(),
+                    },
+                    selected: false,
+                });
+            }
+            Err(_) => {
+                // Handle error - perhaps show a message to the user
+            }
+        }
+    }
+
     pub fn handle_key_event(&mut self, key: KeyEvent) {
         // Handle quit event in any mode
-        if key.code == KeyCode::Char('q') && !self.input_mode {
+        if key.code == KeyCode::Char('q') && !self.input_mode && !self.compare_input_mode {
             self.running = false;
             return;
         }
@@ -92,6 +194,31 @@ impl App {
         // Handle input mode separately
         if self.input_mode {
             self.handle_input_mode(key);
+            return;
+        }
+
+        // Handle compare input mode separately
+        if self.compare_input_mode {
+            match key.code {
+                KeyCode::Enter => {
+                    self.compare_input_mode = false;
+                    if !self.compare_search_query.is_empty() {
+                        let query = self.compare_search_query.clone();
+                        self.add_crate_to_comparison_by_name(&query);
+                        self.compare_search_query.clear();
+                    }
+                }
+                KeyCode::Esc => {
+                    self.compare_input_mode = false;
+                }
+                KeyCode::Char(c) => {
+                    self.compare_search_query.push(c);
+                }
+                KeyCode::Backspace => {
+                    self.compare_search_query.pop();
+                }
+                _ => {}
+            }
             return;
         }
 
@@ -126,10 +253,27 @@ impl App {
             KeyCode::Char('4') => {
                 self.current_tab = Tab::Help;
             }
+            KeyCode::Char('5') => {
+                self.current_tab = Tab::Compare;
+            }
             KeyCode::Char('/') => {
                 if matches!(self.current_tab, Tab::Search) {
                     self.input_mode = true;
                     self.search_query.clear(); // Clear previous query when starting new search
+                }
+            }
+            KeyCode::Char('a') => {
+                if matches!(self.current_tab, Tab::Search)
+                    || matches!(self.current_tab, Tab::Recent)
+                {
+                    self.add_to_comparison();
+                } else if matches!(self.current_tab, Tab::Compare) {
+                    self.compare_input_mode = true;
+                }
+            }
+            KeyCode::Char('d') => {
+                if matches!(self.current_tab, Tab::Compare) {
+                    self.remove_from_comparison();
                 }
             }
             _ => {}
@@ -186,7 +330,8 @@ impl App {
         self.current_tab = match self.current_tab {
             Tab::Search => Tab::Recent,
             Tab::Recent => Tab::Trending,
-            Tab::Trending => Tab::Help,
+            Tab::Trending => Tab::Compare,
+            Tab::Compare => Tab::Help,
             Tab::Help => Tab::Search,
         };
         self.selected_index = 0;
@@ -213,7 +358,8 @@ impl App {
             Tab::Search => Tab::Help,
             Tab::Recent => Tab::Search,
             Tab::Trending => Tab::Recent,
-            Tab::Help => Tab::Trending,
+            Tab::Compare => Tab::Trending,
+            Tab::Help => Tab::Compare,
         };
         self.selected_index = 0;
         self.show_detail = false;
@@ -238,6 +384,7 @@ impl App {
         let max = match self.current_tab {
             Tab::Recent | Tab::Search => self.crates.len(),
             Tab::Trending => self.repos.len(),
+            Tab::Compare => self.compared_crates.len(),
             Tab::Help => 0,
         };
 
@@ -250,6 +397,7 @@ impl App {
         let max = match self.current_tab {
             Tab::Recent | Tab::Search => self.crates.len(),
             Tab::Trending => self.repos.len(),
+            Tab::Compare => self.compared_crates.len(),
             Tab::Help => 0,
         };
 

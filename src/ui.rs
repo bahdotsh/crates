@@ -1,10 +1,15 @@
+use crate::api;
 use crate::app::{App, LoadingState, Tab};
 use chrono::DateTime;
+
+use ratatui::widgets::Cell;
+use ratatui::widgets::Row;
+use ratatui::widgets::Table;
 use ratatui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Span, Spans, Text},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap},
     Frame,
 };
@@ -38,6 +43,12 @@ pub fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) {
                     draw_repo_detail(f, app, chunks[2]);
                 }
             }
+            Tab::Compare => {
+                if !app.compared_crates.is_empty() && app.selected_index < app.compared_crates.len()
+                {
+                    draw_compared_crate_detail(f, app, chunks[2]);
+                }
+            }
             _ => {}
         }
     } else {
@@ -45,6 +56,7 @@ pub fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) {
             Tab::Search => draw_search_tab(f, app, chunks[2]),
             Tab::Recent => draw_crates_list(f, app, chunks[2], "Recent Crates"),
             Tab::Trending => draw_repos_list(f, app, chunks[2], "Trending Repositories"),
+            Tab::Compare => draw_compare_tab(f, app, chunks[2]),
             Tab::Help => draw_help(f, app, chunks[2]),
         }
     }
@@ -65,9 +77,9 @@ fn draw_title<B: Backend>(f: &mut Frame<B>, area: Rect) {
 }
 
 fn draw_tabs<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
-    let titles = ["Search", "Recent", "Trending", "Help"]
+    let titles = ["Search", "Recent", "Trending", "Compare", "Help"]
         .iter()
-        .map(|t| Spans::from(vec![Span::styled(*t, Style::default().fg(Color::White))]))
+        .map(|t| Line::from(vec![Span::styled(*t, Style::default().fg(Color::White))]))
         .collect();
 
     let tabs = Tabs::new(titles)
@@ -76,7 +88,8 @@ fn draw_tabs<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
             Tab::Search => 0,
             Tab::Recent => 1,
             Tab::Trending => 2,
-            Tab::Help => 3,
+            Tab::Compare => 3,
+            Tab::Help => 4,
         })
         .style(Style::default().fg(Color::White))
         .highlight_style(
@@ -88,6 +101,323 @@ fn draw_tabs<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
     f.render_widget(tabs, area);
 }
 
+fn draw_compare_tab<B: Backend>(f: &mut Frame<B>, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Input for adding crates
+            Constraint::Min(0),    // Comparison table
+        ])
+        .split(area);
+
+    // Draw input for adding crates
+    let input_style = if app.compare_input_mode {
+        Style::default().fg(Color::Blue)
+    } else {
+        Style::default()
+    };
+
+    let cursor_position = if app.compare_input_mode {
+        Some(app.compare_search_query.len())
+    } else {
+        None
+    };
+
+    let search_prompt = if app.compare_search_query.is_empty() && !app.compare_input_mode {
+        "Add a crate by name..."
+    } else {
+        ""
+    };
+
+    let search_input = Paragraph::new(
+        if app.compare_search_query.is_empty() && !app.compare_input_mode {
+            Text::styled(search_prompt, Style::default().fg(Color::DarkGray))
+        } else {
+            Text::raw(&app.compare_search_query)
+        },
+    )
+    .style(input_style)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(if app.compare_input_mode {
+                Style::default().fg(Color::Blue)
+            } else {
+                Style::default()
+            })
+            .title(if app.compare_input_mode {
+                "Adding crate..."
+            } else {
+                "Press 'a' to add a crate | 'd' to remove selected"
+            }),
+    );
+
+    f.render_widget(search_input, chunks[0]);
+
+    // Render cursor position when in input mode
+    if app.compare_input_mode && cursor_position.is_some() {
+        f.set_cursor(
+            chunks[0].x + 1 + cursor_position.unwrap() as u16,
+            chunks[0].y + 1,
+        );
+    }
+
+    // Draw comparison table if there are crates to compare
+    if app.compared_crates.is_empty() {
+        let no_crates = Paragraph::new("No crates added for comparison. Press 'a' to add crates.")
+            .style(Style::default().fg(Color::Gray))
+            .alignment(ratatui::layout::Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title("Comparison"));
+
+        f.render_widget(no_crates, chunks[1]);
+        return;
+    }
+
+    // Create a layout for the comparison table
+    // The first column is for crate names, the rest for metrics
+    let column_constraints = vec![
+        Constraint::Percentage(25), // Name
+        Constraint::Percentage(15), // Downloads
+        Constraint::Percentage(15), // License
+        Constraint::Percentage(15), // Security
+        Constraint::Percentage(15), // Updated
+        Constraint::Percentage(15), // Version
+    ];
+
+    let header_cells = [
+        "Crate",
+        "Downloads",
+        "License",
+        "Security",
+        "Updated",
+        "Version",
+    ]
+    .iter()
+    .map(|h| {
+        Cell::from(*h).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
+    let header = Row::new(header_cells).height(1).bottom_margin(1);
+
+    let mut rows = vec![];
+    for (i, compared) in app.compared_crates.iter().enumerate() {
+        let crate_data = &compared.details;
+
+        // Style for highlighting the selected row
+        let style = if i == app.selected_index {
+            Style::default().bg(Color::DarkGray)
+        } else {
+            Style::default()
+        };
+
+        // Security status indicator
+        let security_status = if compared.security.safe {
+            "✓ Safe"
+        } else {
+            "⚠ Warning"
+        };
+
+        // License display
+        let license_display = match &crate_data.license {
+            Some(license) if !license.is_empty() => license,
+            _ => "Unknown",
+        };
+
+        // Format the updated date
+        let updated = if let Ok(dt) = DateTime::parse_from_rfc3339(&crate_data.updated_at) {
+            dt.format("%Y-%m-%d").to_string()
+        } else {
+            "Unknown".to_string()
+        };
+
+        // Create the row
+        let cells = vec![
+            Cell::from(crate_data.name.clone()),
+            Cell::from(format!("{}", crate_data.downloads)),
+            Cell::from(license_display),
+            Cell::from(security_status).style(if compared.security.safe {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Red)
+            }),
+            Cell::from(updated),
+            Cell::from(crate_data.max_version.clone()),
+        ];
+
+        rows.push(Row::new(cells).style(style));
+    }
+
+    let table = Table::new(rows)
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title("Comparison"))
+        .widths(&column_constraints)
+        .column_spacing(1)
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+    f.render_widget(table, chunks[1]);
+}
+
+fn draw_compared_crate_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
+    let compared = &app.compared_crates[app.selected_index];
+    let crate_data = &compared.details;
+
+    let title = format!("{} v{}", crate_data.name, crate_data.max_version);
+
+    let mut content = vec![
+        Line::from(vec![Span::styled(
+            "Description:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::raw(
+            crate_data
+                .description
+                .clone()
+                .unwrap_or_else(|| "No description available.".to_string()),
+        )]),
+        Line::from(vec![]),
+        // License information
+        Line::from(vec![
+            Span::styled(
+                "License: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                crate_data
+                    .license
+                    .clone()
+                    .unwrap_or_else(|| "Unknown".to_string()),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![]),
+        // Security information
+        Line::from(vec![Span::styled(
+            "Security Check:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+    ];
+
+    if compared.security.warnings.is_empty() {
+        content.push(Line::from(vec![Span::styled(
+            "✓ No security issues detected",
+            Style::default().fg(Color::Green),
+        )]));
+    } else {
+        content.push(Line::from(vec![Span::styled(
+            "⚠ Security warnings:",
+            Style::default().fg(Color::Red),
+        )]));
+
+        for warning in &compared.security.warnings {
+            content.push(Line::from(vec![Span::styled(
+                format!("  • {}", warning),
+                Style::default().fg(Color::Red),
+            )]));
+        }
+    }
+
+    content.extend_from_slice(&[
+        Line::from(vec![]),
+        Line::from(vec![
+            Span::styled(
+                "Downloads: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}", crate_data.downloads),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Line::from(vec![]),
+        Line::from(vec![
+            Span::styled(
+                "Created: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format_date(&crate_data.created_at),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "Updated: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format_date(&crate_data.updated_at),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![]),
+    ]);
+
+    if let Some(ref docs) = crate_data.documentation {
+        content.push(Line::from(vec![
+            Span::styled(
+                "Documentation: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                docs,
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+        ]));
+    }
+
+    if let Some(ref repo) = crate_data.repository {
+        content.push(Line::from(vec![
+            Span::styled(
+                "Repository: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                repo,
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+        ]));
+    }
+
+    // Add navigation help
+    content.extend_from_slice(&[
+        Line::from(vec![]),
+        Line::from(vec![]),
+        Line::from(vec![Span::styled(
+            "Press ESC or q to go back",
+            Style::default().fg(Color::Gray),
+        )]),
+    ]);
+
+    let detail = Paragraph::new(content)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .wrap(Wrap { trim: true })
+        .scroll((app.detail_scroll as u16, 0));
+
+    f.render_widget(detail, area);
+}
 fn draw_crates_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: &str) {
     let items: Vec<ListItem> = app
         .crates
@@ -108,7 +438,7 @@ fn draw_crates_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: 
             let mut content = vec![];
 
             // Name with version
-            content.push(Spans::from(vec![Span::styled(
+            content.push(Line::from(vec![Span::styled(
                 name,
                 Style::default()
                     .fg(Color::Blue)
@@ -121,7 +451,7 @@ fn draw_crates_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: 
 
             // Repository URL in green (if available)
             if let Some(repo) = &c.repository {
-                content.push(Spans::from(vec![Span::styled(
+                content.push(Line::from(vec![Span::styled(
                     truncate_str(repo, 60),
                     Style::default().fg(Color::Green),
                 )]));
@@ -129,18 +459,18 @@ fn draw_crates_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: 
 
             // Description
             if !desc.is_empty() {
-                content.push(Spans::from(vec![Span::raw(truncate_str(&desc, 80))]));
+                content.push(Line::from(vec![Span::raw(truncate_str(&desc, 80))]));
             }
 
             // Stats line
-            content.push(Spans::from(vec![
+            content.push(Line::from(vec![
                 Span::styled(downloads, Style::default().fg(Color::Yellow)),
                 Span::raw(" · Updated: "),
                 Span::styled(updated, Style::default().fg(Color::Gray)),
             ]));
 
             // Add a blank line between results for better readability
-            content.push(Spans::from(vec![Span::raw("")]));
+            content.push(Line::from(vec![Span::raw("")]));
 
             ListItem::new(content).style(if i == app.selected_index {
                 Style::default().bg(Color::DarkGray)
@@ -152,7 +482,7 @@ fn draw_crates_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: 
 
     // If we're in loading state, show a loading message
     if matches!(app.loading_state, LoadingState::Loading) {
-        let loading = ListItem::new(vec![Spans::from(vec![Span::styled(
+        let loading = ListItem::new(vec![Line::from(vec![Span::styled(
             "Loading...",
             Style::default().fg(Color::Yellow),
         )])]);
@@ -171,7 +501,7 @@ fn draw_crates_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: 
 
     // If there's an error, show the error message
     if let LoadingState::Error(ref msg) = app.loading_state {
-        let error = ListItem::new(vec![Spans::from(vec![Span::styled(
+        let error = ListItem::new(vec![Line::from(vec![Span::styled(
             format!("Error: {}", msg),
             Style::default().fg(Color::Red),
         )])]);
@@ -185,7 +515,7 @@ fn draw_crates_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: 
 
     // If we have no items, show a message
     if items.is_empty() {
-        let empty = ListItem::new(vec![Spans::from(vec![Span::styled(
+        let empty = ListItem::new(vec![Line::from(vec![Span::styled(
             "No items found",
             Style::default().fg(Color::Gray),
         )])]);
@@ -229,14 +559,14 @@ fn draw_repos_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: &
             let language = r.language.clone().unwrap_or_else(|| "Unknown".to_string());
 
             let content = vec![
-                Spans::from(vec![Span::styled(
+                Line::from(vec![Span::styled(
                     name,
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 )]),
-                Spans::from(vec![Span::raw(truncate_str(&desc, 60))]),
-                Spans::from(vec![
+                Line::from(vec![Span::raw(truncate_str(&desc, 60))]),
+                Line::from(vec![
                     Span::styled(stars, Style::default().fg(Color::Yellow)),
                     Span::raw(" | "),
                     Span::styled(forks, Style::default().fg(Color::Blue)),
@@ -255,7 +585,7 @@ fn draw_repos_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: &
 
     // Handle loading, error, and empty states (similar to draw_crates_list)
     if matches!(app.loading_state, LoadingState::Loading) {
-        let loading = ListItem::new(vec![Spans::from(vec![Span::styled(
+        let loading = ListItem::new(vec![Line::from(vec![Span::styled(
             "Loading...",
             Style::default().fg(Color::Yellow),
         )])]);
@@ -268,7 +598,7 @@ fn draw_repos_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: &
     }
 
     if let LoadingState::Error(ref msg) = app.loading_state {
-        let error = ListItem::new(vec![Spans::from(vec![Span::styled(
+        let error = ListItem::new(vec![Line::from(vec![Span::styled(
             format!("Error: {}", msg),
             Style::default().fg(Color::Red),
         )])]);
@@ -281,7 +611,7 @@ fn draw_repos_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: &
     }
 
     if items.is_empty() {
-        let empty = ListItem::new(vec![Spans::from(vec![Span::styled(
+        let empty = ListItem::new(vec![Line::from(vec![Span::styled(
             "No items found",
             Style::default().fg(Color::Gray),
         )])]);
@@ -414,21 +744,76 @@ fn draw_crate_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
 
     let title = format!("{} v{}", crate_data.name, crate_data.max_version);
 
+    // Run security check
+    let security_warnings = api::security_check(crate_data);
+    let is_safe = security_warnings.is_empty();
+
     let mut content = vec![
-        Spans::from(vec![Span::styled(
+        Line::from(vec![Span::styled(
             "Description:",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Spans::from(vec![Span::raw(
+        Line::from(vec![Span::raw(
             crate_data
                 .description
                 .clone()
                 .unwrap_or_else(|| "No description available.".to_string()),
         )]),
-        Spans::from(vec![]),
-        Spans::from(vec![
+        Line::from(vec![]),
+        // Add license information
+        Line::from(vec![
+            Span::styled(
+                "License: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                crate_data
+                    .license
+                    .clone()
+                    .unwrap_or_else(|| "Unknown".to_string()),
+                if crate_data.license.is_some() {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Red)
+                },
+            ),
+        ]),
+        Line::from(vec![]),
+        // Add security information
+        Line::from(vec![Span::styled(
+            "Security Check:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+    ];
+
+    if is_safe {
+        content.push(Line::from(vec![Span::styled(
+            "✓ No security issues detected",
+            Style::default().fg(Color::Green),
+        )]));
+    } else {
+        content.push(Line::from(vec![Span::styled(
+            "⚠ Security warnings:",
+            Style::default().fg(Color::Red),
+        )]));
+
+        for warning in &security_warnings {
+            content.push(Line::from(vec![Span::styled(
+                format!("  • {}", warning),
+                Style::default().fg(Color::Red),
+            )]));
+        }
+    }
+
+    content.extend_from_slice(&[
+        Line::from(vec![]),
+        Line::from(vec![
             Span::styled(
                 "Downloads: ",
                 Style::default()
@@ -440,8 +825,8 @@ fn draw_crate_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
                 Style::default().fg(Color::Cyan),
             ),
         ]),
-        Spans::from(vec![]),
-        Spans::from(vec![
+        Line::from(vec![]),
+        Line::from(vec![
             Span::styled(
                 "Created: ",
                 Style::default()
@@ -453,7 +838,7 @@ fn draw_crate_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
                 Style::default().fg(Color::White),
             ),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled(
                 "Updated: ",
                 Style::default()
@@ -465,11 +850,11 @@ fn draw_crate_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
                 Style::default().fg(Color::White),
             ),
         ]),
-        Spans::from(vec![]),
-    ];
+        Line::from(vec![]),
+    ]);
 
     if let Some(ref docs) = crate_data.documentation {
-        content.push(Spans::from(vec![
+        content.push(Line::from(vec![
             Span::styled(
                 "Documentation: ",
                 Style::default()
@@ -486,7 +871,7 @@ fn draw_crate_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
     }
 
     if let Some(ref repo) = crate_data.repository {
-        content.push(Spans::from(vec![
+        content.push(Line::from(vec![
             Span::styled(
                 "Repository: ",
                 Style::default()
@@ -502,11 +887,15 @@ fn draw_crate_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
         ]));
     }
 
-    // Add navigation help
+    // Add option to add to comparison
     content.extend_from_slice(&[
-        Spans::from(vec![]),
-        Spans::from(vec![]),
-        Spans::from(vec![Span::styled(
+        Line::from(vec![]),
+        Line::from(vec![Span::styled(
+            "Press 'a' to add to comparison",
+            Style::default().fg(Color::Blue),
+        )]),
+        Line::from(vec![]),
+        Line::from(vec![Span::styled(
             "Press ESC or q to go back",
             Style::default().fg(Color::Gray),
         )]),
@@ -526,20 +915,20 @@ fn draw_repo_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
     let title = &repo_data.full_name;
 
     let content = vec![
-        Spans::from(vec![Span::styled(
+        Line::from(vec![Span::styled(
             "Description:",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Spans::from(vec![Span::raw(
+        Line::from(vec![Span::raw(
             repo_data
                 .description
                 .clone()
                 .unwrap_or_else(|| "No description available.".to_string()),
         )]),
-        Spans::from(vec![]),
-        Spans::from(vec![
+        Line::from(vec![]),
+        Line::from(vec![
             Span::styled(
                 "Stars: ",
                 Style::default()
@@ -551,7 +940,7 @@ fn draw_repo_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
                 Style::default().fg(Color::Cyan),
             ),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled(
                 "Forks: ",
                 Style::default()
@@ -563,8 +952,8 @@ fn draw_repo_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
                 Style::default().fg(Color::Cyan),
             ),
         ]),
-        Spans::from(vec![]),
-        Spans::from(vec![
+        Line::from(vec![]),
+        Line::from(vec![
             Span::styled(
                 "Language: ",
                 Style::default()
@@ -579,8 +968,8 @@ fn draw_repo_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
                 Style::default().fg(Color::Magenta),
             ),
         ]),
-        Spans::from(vec![]),
-        Spans::from(vec![
+        Line::from(vec![]),
+        Line::from(vec![
             Span::styled(
                 "URL: ",
                 Style::default()
@@ -595,9 +984,9 @@ fn draw_repo_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
             ),
         ]),
         // Add navigation help
-        Spans::from(vec![]),
-        Spans::from(vec![]),
-        Spans::from(vec![Span::styled(
+        Line::from(vec![]),
+        Line::from(vec![]),
+        Line::from(vec![Span::styled(
             "Press ESC or q to go back",
             Style::default().fg(Color::Gray),
         )]),
@@ -612,100 +1001,142 @@ fn draw_repo_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
 }
 fn draw_help<B: Backend>(f: &mut Frame<B>, _app: &App, area: Rect) {
     let text = vec![
-        Spans::from(Span::styled(
+        Line::from(Span::styled(
             "Crates Explorer - Help",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         )),
-        Spans::from(""),
-        Spans::from(Span::styled(
+        Line::from(""),
+        Line::from(Span::styled(
             "Keyboard Controls:",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
-        Spans::from(""),
-        Spans::from(vec![
+        Line::from(""),
+        Line::from(vec![
             Span::styled("Tab", Style::default().fg(Color::Cyan)),
             Span::raw(" / "),
             Span::styled("Shift+Tab", Style::default().fg(Color::Cyan)),
             Span::raw(" - Switch between tabs"),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled("j", Style::default().fg(Color::Cyan)),
             Span::raw(" / "),
             Span::styled("Down", Style::default().fg(Color::Cyan)),
             Span::raw(" - Move down"),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled("k", Style::default().fg(Color::Cyan)),
             Span::raw(" / "),
             Span::styled("Up", Style::default().fg(Color::Cyan)),
             Span::raw(" - Move up"),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled("Enter", Style::default().fg(Color::Cyan)),
             Span::raw(" - Show details"),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled("/", Style::default().fg(Color::Cyan)),
             Span::raw(" - Search (in Search tab)"),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled("1-4", Style::default().fg(Color::Cyan)),
             Span::raw(" - Switch tabs directly"),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled("q", Style::default().fg(Color::Cyan)),
             Span::raw(" / "),
             Span::styled("Ctrl+C", Style::default().fg(Color::Cyan)),
             Span::raw(" - Quit"),
         ]),
-        Spans::from(""),
-        Spans::from(vec![
+        Line::from(""),
+        Line::from(vec![
             Span::styled("Esc", Style::default().fg(Color::Cyan)),
             Span::raw(" - Exit detail view or search input"),
         ]),
-        Spans::from(""),
-        Spans::from(Span::styled(
+        Line::from(""),
+        Line::from(Span::styled(
             "In Detail View:",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled("j/k", Style::default().fg(Color::Cyan)),
             Span::raw(" - Scroll up/down"),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled("PageUp/PageDown", Style::default().fg(Color::Cyan)),
             Span::raw(" - Scroll by page"),
         ]),
-        Spans::from(""),
-        Spans::from(Span::styled(
+        Line::from(""),
+        Line::from(Span::styled(
             "Tab Guide:",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
-        Spans::from(""),
-        Spans::from(vec![
+        Line::from(""),
+        Line::from(vec![
             Span::styled("Search", Style::default().fg(Color::Green)),
             Span::raw(" - Search for crates by name"),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled("Recent", Style::default().fg(Color::Green)),
             Span::raw(" - Recently updated crates"),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled("Trending", Style::default().fg(Color::Green)),
             Span::raw(" - Trending Rust repositories on GitHub"),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled("Help", Style::default().fg(Color::Green)),
             Span::raw(" - This help screen"),
         ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "License & Security Features:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::raw("• Crate details now include "),
+            Span::styled("license information", Style::default().fg(Color::Green)),
+            Span::raw(" and "),
+            Span::styled("security checks", Style::default().fg(Color::Red)),
+        ]),
+        Line::from(vec![Span::raw(
+            "• Security warnings highlight potential issues with crates",
+        )]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Compare Tab:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("5", Style::default().fg(Color::Cyan)),
+            Span::raw(" - Switch to Compare tab"),
+        ]),
+        Line::from(vec![
+            Span::styled("a", Style::default().fg(Color::Cyan)),
+            Span::raw(" - Add current crate to comparison or add new crate by name"),
+        ]),
+        Line::from(vec![
+            Span::styled("d", Style::default().fg(Color::Cyan)),
+            Span::raw(" - Remove selected crate from comparison"),
+        ]),
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::raw(" - View detailed security and license info"),
+        ]),
+        Line::from(vec![Span::raw(
+            "Compare key metrics across multiple crates side by side",
+        )]),
     ];
 
     let help = Paragraph::new(text)
@@ -740,15 +1171,28 @@ fn draw_status_bar<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
                 "Trending"
             }
         }
+        Tab::Compare => {
+            if app.show_detail {
+                "Compare > Crate Detail"
+            } else if app.compare_input_mode {
+                "Compare > Adding Crate"
+            } else {
+                "Compare"
+            }
+        }
         Tab::Help => "Help",
     };
 
     let navigation_help = if app.show_detail {
         "ESC to go back | j/k to scroll"
-    } else if app.input_mode {
-        "ESC to cancel | Enter to search"
+    } else if app.input_mode || app.compare_input_mode {
+        "ESC to cancel | Enter to confirm"
     } else if matches!(app.current_tab, Tab::Search) {
-        "/ to search | Enter to view details | q to quit"
+        "/ to search | Enter to view details | a to add to comparison | q to quit"
+    } else if matches!(app.current_tab, Tab::Recent) {
+        "Enter to view details | a to add to comparison | q to quit"
+    } else if matches!(app.current_tab, Tab::Compare) {
+        "a to add crate | d to remove | Enter to view details | q to quit"
     } else {
         "Enter to view details | q to quit"
     };
