@@ -129,6 +129,7 @@ impl App {
             KeyCode::Char('/') => {
                 if matches!(self.current_tab, Tab::Search) {
                     self.input_mode = true;
+                    self.search_query.clear(); // Clear previous query when starting new search
                 }
             }
             _ => {}
@@ -160,7 +161,10 @@ impl App {
         match key.code {
             KeyCode::Enter => {
                 self.input_mode = false;
-                self.search_crates();
+                if !self.search_query.is_empty() {
+                    self.search_crates();
+                    self.selected_index = 0; // Reset selection to the top result
+                }
             }
             KeyCode::Esc => {
                 self.input_mode = false;
@@ -170,6 +174,9 @@ impl App {
             }
             KeyCode::Backspace => {
                 self.search_query.pop();
+            }
+            KeyCode::Tab => {
+                // Auto-complete functionality could be added here
             }
             _ => {}
         }
@@ -295,6 +302,19 @@ impl App {
         self.loading_state = LoadingState::Loading;
 
         match api::search_crates(&self.search_query, 20) {
+            Ok(crates) => {
+                self.crates = crates;
+                self.loading_state = LoadingState::Loaded;
+            }
+            Err(e) => {
+                self.loading_state = LoadingState::Error(e.to_string());
+            }
+        }
+    }
+    pub fn search_crates_silently(&mut self, query: &str) {
+        self.loading_state = LoadingState::Loading;
+
+        match api::search_crates(query, 20) {
             Ok(crates) => {
                 self.crates = crates;
                 self.loading_state = LoadingState::Loaded;

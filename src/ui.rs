@@ -96,35 +96,57 @@ fn draw_crates_list<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect, title: 
         .map(|(i, c)| {
             let name = format!("{} v{}", c.name, c.max_version);
             let desc = c.description.clone().unwrap_or_default();
-            let downloads = format!("Downloads: {}", c.downloads);
+            let downloads = format!("{} downloads", c.downloads);
 
             // Parse and format date
             let updated = if let Ok(dt) = DateTime::parse_from_rfc3339(&c.updated_at) {
-                format!("Updated: {}", dt.format("%Y-%m-%d"))
+                dt.format("%Y-%m-%d").to_string()
             } else {
                 "".to_string()
             };
 
-            let content = vec![
-                Spans::from(vec![Span::styled(
-                    name,
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                )]),
-                Spans::from(vec![Span::raw(truncate_str(&desc, 60))]),
-                Spans::from(vec![
-                    Span::styled(downloads, Style::default().fg(Color::Blue)),
-                    Span::raw(" | "),
-                    Span::styled(updated, Style::default().fg(Color::Yellow)),
-                ]),
-            ];
+            let mut content = vec![];
 
-            ListItem::new(content).style(Style::default().fg(if i == app.selected_index {
-                Color::Yellow
+            // Name with version
+            content.push(Spans::from(vec![Span::styled(
+                name,
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(if i == app.selected_index {
+                        Modifier::BOLD | Modifier::UNDERLINED
+                    } else {
+                        Modifier::BOLD
+                    }),
+            )]));
+
+            // Repository URL in green (if available)
+            if let Some(repo) = &c.repository {
+                content.push(Spans::from(vec![Span::styled(
+                    truncate_str(repo, 60),
+                    Style::default().fg(Color::Green),
+                )]));
+            }
+
+            // Description
+            if !desc.is_empty() {
+                content.push(Spans::from(vec![Span::raw(truncate_str(&desc, 80))]));
+            }
+
+            // Stats line
+            content.push(Spans::from(vec![
+                Span::styled(downloads, Style::default().fg(Color::Yellow)),
+                Span::raw(" · Updated: "),
+                Span::styled(updated, Style::default().fg(Color::Gray)),
+            ]));
+
+            // Add a blank line between results for better readability
+            content.push(Spans::from(vec![Span::raw("")]));
+
+            ListItem::new(content).style(if i == app.selected_index {
+                Style::default().bg(Color::DarkGray)
             } else {
-                Color::White
-            }))
+                Style::default()
+            })
         })
         .collect();
 
@@ -295,42 +317,96 @@ fn draw_search_tab<B: Backend>(f: &mut Frame<B>, app: &mut App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Search input
+            Constraint::Length(1), // Small padding
             Constraint::Min(0),    // Search results
         ])
         .split(area);
 
-    // Draw search input - highlight when in input mode
-    let search_input = Paragraph::new(app.search_query.as_ref())
-        .style(if app.input_mode {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(if app.input_mode {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default()
-                })
-                .title(if app.input_mode {
-                    "Enter search query (press Enter to search)"
-                } else {
-                    "Search Query (press / to search)"
-                }),
-        );
+    // Create a Google-like search input
+    let input_style = if app.input_mode {
+        Style::default().fg(Color::Blue)
+    } else {
+        Style::default()
+    };
+
+    let cursor_position = if app.input_mode {
+        Some(app.search_query.len())
+    } else {
+        None
+    };
+
+    let search_prompt = if app.search_query.is_empty() && !app.input_mode {
+        "Search for crates..."
+    } else {
+        ""
+    };
+
+    let search_input = Paragraph::new(if app.search_query.is_empty() && !app.input_mode {
+        Text::styled(search_prompt, Style::default().fg(Color::DarkGray))
+    } else {
+        Text::raw(&app.search_query)
+    })
+    .style(input_style)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(if app.input_mode {
+                Style::default().fg(Color::Blue)
+            } else {
+                Style::default()
+            })
+            .title(if app.input_mode {
+                "🔍 Type to search"
+            } else {
+                "🔍 Press / to search"
+            }),
+    );
 
     f.render_widget(search_input, chunks[0]);
 
-    // Draw search results with a better title
+    // Render cursor position when in input mode
+    if app.input_mode && cursor_position.is_some() {
+        f.set_cursor(
+            chunks[0].x + 1 + cursor_position.unwrap() as u16,
+            chunks[0].y + 1,
+        );
+    }
+
+    // Add stats about results if we have searched - use String instead of &str
+    let stats_text = if !app.crates.is_empty() && !app.search_query.is_empty() {
+        format!(
+            "Found {} results for \"{}\"",
+            app.crates.len(),
+            app.search_query
+        )
+    } else {
+        String::new()
+    };
+
+    let stats = Paragraph::new(stats_text)
+        .style(Style::default().fg(Color::Gray))
+        .alignment(ratatui::layout::Alignment::Left);
+
+    f.render_widget(stats, chunks[1]);
+
+    // Draw search results with a simple title
     let title = if app.search_query.is_empty() {
-        "Type / to search for crates"
+        "Popular Crates"
     } else {
         "Search Results"
     };
 
-    draw_crates_list(f, app, chunks[1], title);
+    // Update the app to show popular crates when no search is active
+    if app.search_query.is_empty()
+        && app.crates.is_empty()
+        && matches!(app.loading_state, LoadingState::NotLoading)
+    {
+        // Pretend we're searching for a broadly popular term to show useful results
+        app.loading_state = LoadingState::Loading;
+        app.search_crates_silently("rust");
+    }
+
+    draw_crates_list(f, app, chunks[2], title);
 }
 
 fn draw_crate_detail<B: Backend>(f: &mut Frame<B>, app: &App, area: Rect) {
