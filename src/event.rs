@@ -6,6 +6,7 @@ use std::{
 };
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum Event {
     Tick,
     Key(KeyEvent),

@@ -22,6 +22,7 @@ struct CratesResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct Repository {
     pub name: String,
     pub full_name: String,
