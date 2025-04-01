@@ -133,16 +133,62 @@ pub fn get_crate_details(name: &str) -> Result<Crate, Box<dyn std::error::Error>
 pub fn security_check(crate_data: &Crate) -> Vec<String> {
     let mut warnings = Vec::new();
 
-    // Check for indicators that might suggest security issues
+    // 1. License check - more sophisticated
+    // Add debug logging to see what we're actually receiving
+    if let Some(license) = &crate_data.license {
+        if license.trim().is_empty() {
+            warnings.push("Empty license specified".to_string());
+        } else {
+            // License exists and is not empty - check for common types
+            let license_lower = license.to_lowercase();
 
-    // 1. No license specified
-    if crate_data.license.is_none() || crate_data.license.as_deref() == Some("") {
+            // Uncommon or proprietary license warning
+            let common_licenses = [
+                "mit",
+                "apache",
+                "gpl",
+                "lgpl",
+                "bsd",
+                "mpl",
+                "unlicense",
+                "isc",
+                "zlib",
+                "wtfpl",
+                "cc0",
+                "boost",
+                "artistic",
+                "mozilla",
+                "zlib/libpng",
+            ];
+
+            let mut is_common = false;
+            for common in common_licenses.iter() {
+                if license_lower.contains(common) {
+                    is_common = true;
+                    break;
+                }
+            }
+
+            if !is_common {
+                warnings.push(format!(
+                    "Uncommon license: '{}' - verify before use",
+                    license
+                ));
+            }
+
+            // Warning for copyleft licenses that might affect projects
+            if license_lower.contains("gpl") && !license_lower.contains("lgpl") {
+                warnings.push(
+                    "GPL license may require derivative works to be open-sourced".to_string(),
+                );
+            }
+        }
+    } else {
         warnings.push("No license specified".to_string());
     }
 
     // 2. Recent crate with high downloads could be suspicious
     if let Ok(created) = DateTime::parse_from_rfc3339(&crate_data.created_at) {
-        // Fix the DateTime conversion
         let created_utc = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
             created.naive_utc(),
             chrono::Utc,
@@ -154,17 +200,78 @@ pub fn security_check(crate_data: &Crate) -> Vec<String> {
         }
     }
 
-    // 3. Check name similarity to popular crates (potential typosquatting)
-    let typosquatting_targets = ["serde", "tokio", "reqwest", "actix", "rocket", "diesel"];
-    for target in typosquatting_targets {
-        if crate_data.name != target && levenshtein_distance(&crate_data.name, target) <= 2 {
-            warnings.push(format!("Name similar to popular crate '{}'", target));
+    // 3. Improved typosquatting detection
+    let popular_crates = [
+        "serde",
+        "tokio",
+        "reqwest",
+        "actix",
+        "rocket",
+        "diesel",
+        "clap",
+        "futures",
+        "rand",
+        "log",
+        "chrono",
+        "lazy_static",
+        "wasm-bindgen",
+        "regex",
+        "hyper",
+        "rayon",
+        "anyhow",
+        "thiserror",
+    ];
+
+    for target in popular_crates {
+        if crate_data.name != target {
+            // Check for exact prefix/suffix
+            if crate_data.name.starts_with(target) || crate_data.name.ends_with(target) {
+                if crate_data.name.len() > target.len() && crate_data.name.len() <= target.len() + 3
+                {
+                    warnings.push(format!("Name suspiciously similar to '{}'", target));
+                    break;
+                }
+            }
+
+            // Check for Levenshtein distance for non-prefix/suffix cases
+            // Only warn if the crate name is similar in length to avoid false positives
+            let length_diff =
+                (crate_data.name.len() as isize - target.len() as isize).abs() as usize;
+
+            if length_diff <= 2 && levenshtein_distance(&crate_data.name, target) <= 2 {
+                warnings.push(format!("Name similar to popular crate '{}'", target));
+                break;
+            }
         }
     }
 
     // 4. No repository link
-    if crate_data.repository.is_none() {
+    if crate_data.repository.is_none()
+        || crate_data
+            .repository
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
         warnings.push("No repository link".to_string());
+    }
+
+    // 5. No documentation
+    if crate_data.documentation.is_none()
+        || crate_data
+            .documentation
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        warnings.push("No documentation link".to_string());
+    }
+
+    // 6. Version number check - very low versions might be pre-production
+    if crate_data.max_version.starts_with("0.0.") || crate_data.max_version == "0.0.1" {
+        warnings.push("Very early version - may not be stable".to_string());
     }
 
     warnings
